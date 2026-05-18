@@ -117,7 +117,7 @@ helm-template:
 	helm template codex-lb deploy/helm/codex-lb/ -f deploy/helm/codex-lb/values-prod.yaml --set externalSecrets.secretStoreRef.name=test-store > /dev/null
 
 helm-kubeconform:
-	set -o pipefail; \
+	set -e -o pipefail; \
 	for version in 1.32.0 1.35.0; do \
 	  helm template codex-lb deploy/helm/codex-lb/ \
 	    -f deploy/helm/codex-lb/values-prod.yaml \
