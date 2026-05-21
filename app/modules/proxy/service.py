@@ -2323,6 +2323,7 @@ class ProxyService:
         )
         selection_model = api_key.enforced_model if api_key is not None else None
         routing_strategy = _routing_strategy(settings)
+        prefer_earlier_reset_window = _prefer_earlier_reset_window(settings)
         account_id_value: str | None = None
         log_status = "error"
         log_error_code: str | None = None
@@ -2340,6 +2341,7 @@ class ProxyService:
                 reallocate_sticky=affinity.reallocate_sticky,
                 sticky_max_age_seconds=affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
                 model=selection_model,
             )
@@ -2348,6 +2350,7 @@ class ProxyService:
                 account = await self._select_codex_control_account_without_budget(
                     affinity=affinity,
                     api_key=api_key,
+                    prefer_earlier_reset_window=prefer_earlier_reset_window,
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
@@ -2534,6 +2537,7 @@ class ProxyService:
         )
         selection_model = api_key.enforced_model if api_key is not None else None
         routing_strategy = _routing_strategy(settings)
+        prefer_earlier_reset_window = _prefer_earlier_reset_window(settings)
         account_id_value: str | None = None
         log_status = "error"
         log_error_code: str | None = None
@@ -2551,6 +2555,7 @@ class ProxyService:
                 reallocate_sticky=affinity.reallocate_sticky,
                 sticky_max_age_seconds=affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=routing_strategy,
                 model=selection_model,
             )
@@ -2559,6 +2564,7 @@ class ProxyService:
                 account = await self._select_codex_control_account_without_budget(
                     affinity=affinity,
                     api_key=api_key,
+                    prefer_earlier_reset_window=prefer_earlier_reset_window,
                 )
                 if account is None:
                     log_error_code = selection.error_code or "no_accounts"
@@ -4923,6 +4929,7 @@ class ProxyService:
         *,
         affinity: _AffinityPolicy,
         api_key: ApiKeyData | None,
+        prefer_earlier_reset_window: ResetPreferenceWindow,
     ) -> Account | None:
         scoped_account_ids = (
             set(api_key.assigned_account_ids)
@@ -4935,6 +4942,9 @@ class ProxyService:
             sticky_kind=affinity.kind,
             reallocate_sticky=affinity.reallocate_sticky,
             sticky_max_age_seconds=affinity.max_age_seconds,
+            prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=_routing_strategy(settings),
             account_ids=scoped_account_ids,
             budget_threshold_pct=settings.sticky_reallocation_budget_threshold_pct,
         )
@@ -6293,6 +6303,7 @@ class ProxyService:
         )
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         settings = await get_settings_cache().get()
+        prefer_earlier_reset_window = _prefer_earlier_reset_window(settings)
         excluded_account_ids: set[str] = set()
         retry_same_account_once = preferred_account_id is not None
         preferred_candidate_id = preferred_account_id
@@ -6308,6 +6319,7 @@ class ProxyService:
                 reallocate_sticky=affinity.reallocate_sticky,
                 sticky_max_age_seconds=affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=_routing_strategy(settings),
                 model=request_model,
                 exclude_account_ids=excluded_account_ids,
@@ -7063,6 +7075,7 @@ class ProxyService:
 
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
         settings = await get_settings_cache().get()
+        prefer_earlier_reset_window = _prefer_earlier_reset_window(settings)
         session.api_key = request_state.api_key
         skip_same_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
         excluded_account_ids: set[str] = {session.account.id} if skip_same_account else set()
@@ -7080,6 +7093,7 @@ class ProxyService:
                 reallocate_sticky=session.affinity.reallocate_sticky,
                 sticky_max_age_seconds=session.affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
                 routing_strategy=_routing_strategy(settings),
                 model=session.request_model,
                 exclude_account_ids=excluded_account_ids,
@@ -11188,7 +11202,7 @@ class ProxyService:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
+        prefer_earlier_reset_window: ResetPreferenceWindow,
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
