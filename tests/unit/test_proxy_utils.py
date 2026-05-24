@@ -15675,3 +15675,234 @@ async def test_pop_replayable_precreated_request_suppresses_replay_after_respons
 
     assert replayed is None
     assert pending_requests == deque([request_state])
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_converts_external_urls(monkeypatch):
+    """HTTP bridge must inline external image URLs to data: URLs just like the
+    HTTP direct path does.  Without this, the upstream WS silently rejects the
+    request and the client sees a hang / stream_idle_timeout."""
+
+    data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+    inlined_payloads: list[dict] = []
+
+    async def fake_inline(payload_dict, _session, _timeout):
+        inlined_payloads.append(payload_dict)
+        # Simulate converting the http URL to a data URL
+        d = dict(payload_dict)
+        inp = list(d["input"])
+        item = dict(inp[0])
+        content = list(item["content"])
+        img_part = dict(content[1])
+        img_part["image_url"] = data_url
+        content[1] = img_part
+        item["content"] = content
+        inp[0] = item
+        d["input"] = inp
+        return d
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe this"},
+                    {"type": "input_image", "image_url": "https://example.com/photo.png"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_1",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    result = await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert len(inlined_payloads) == 1
+    result_dict = json.loads(result)
+    assert result_dict["input"][0]["content"][1]["image_url"] == data_url
+    # request_state.request_text must also be updated for replay safety
+    assert request_state.request_text == result
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_skips_when_disabled(monkeypatch):
+    """When image_inline_fetch_enabled is False, no inlining should happen."""
+
+    class FakeSettings:
+        image_inline_fetch_enabled = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "https://example.com/photo.png"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_2",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    result = await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert result == text_data
+    assert request_state.request_text == text_data
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_skips_data_urls(monkeypatch):
+    """Payloads that already use data: URLs should pass through unchanged."""
+
+    inlined_payloads: list[dict] = []
+
+    async def fake_inline(payload_dict, _session, _timeout):
+        inlined_payloads.append(payload_dict)
+        return dict(payload_dict)
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc123"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_3",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    result = await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert len(inlined_payloads) == 1
+    assert result == text_data
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_rejects_when_fetch_fails(monkeypatch):
+    """When inlining fails (fetch returns None / URL survives), the method
+    must raise a 400 error immediately rather than letting upstream hang."""
+    from app.core.clients.proxy import ProxyResponseError
+
+    async def fake_inline_noop(payload_dict, _session, _timeout):
+        # Simulate fetch failure: return unchanged payload
+        return dict(payload_dict)
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline_noop)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe this"},
+                    {"type": "input_image", "image_url": "https://example.com/photo.png"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_fail",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert exc_info.value.status_code == 400
+    assert "image_download_failed" in json.dumps(exc_info.value.payload)

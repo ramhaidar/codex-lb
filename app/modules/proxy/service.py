@@ -38,9 +38,12 @@ from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
+from app.core.clients.http import lease_http_session
 from app.core.clients.proxy import (
     CodexControlResponse,
     ProxyResponseError,
+    _as_image_fetch_session,
+    _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -830,6 +833,7 @@ class ProxyService:
             api_key_reservation=api_key_reservation,
             request_id=request_id,
         )
+        text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
         if downstream_turn_state is not None:
             request_state.session_id = _normalize_session_id(downstream_turn_state)
         if previous_response_trimmed_input_count is not None:
@@ -4245,6 +4249,67 @@ class ProxyService:
         request_state.request_text = text_data
         _enforce_response_create_size_limit(request_state)
         return request_state, text_data
+
+    async def _inline_http_bridge_image_urls(
+        self,
+        text_data: str,
+        request_state: _WebSocketRequestState,
+    ) -> str:
+        """Inline external ``input_image`` URLs into ``data:`` URLs.
+
+        The HTTP direct-stream path already does this via
+        ``_inline_input_image_urls`` in :mod:`app.core.clients.proxy`, but the
+        HTTP bridge (WebSocket pool) path was missing the conversion.  The
+        upstream ChatGPT WebSocket only accepts ``data:image/…`` payloads; an
+        external ``https://`` image URL causes it to silently reject or hang
+        the request.
+
+        This method applies the same transformation to the already-serialised
+        ``text_data`` JSON that will be sent on the upstream WebSocket.
+        If any external image URLs survive inlining (because the fetch failed),
+        the request is rejected immediately with a 400 error rather than
+        allowing the upstream to hang.
+        """
+        settings = get_settings()
+        if not settings.image_inline_fetch_enabled:
+            return text_data
+        # Quick string-level pre-check: skip the parse/fetch cycle when the
+        # payload contains no ``input_image`` items with an ``http`` URL.
+        if "input_image" not in text_data:
+            return text_data
+        try:
+            payload_dict: dict[str, JsonValue] = json.loads(text_data)
+        except (json.JSONDecodeError, TypeError):
+            return text_data
+        connect_timeout = getattr(settings, "upstream_connect_timeout_seconds", 5.0)
+        async with lease_http_session() as http_session:
+            inlined = await _inline_input_image_urls(
+                payload_dict,
+                _as_image_fetch_session(http_session),
+                connect_timeout,
+            )
+        # After inlining, check if any external URLs survived (i.e. fetch
+        # failed).  The upstream WS only accepts data: URLs so sending an
+        # external URL would just cause a silent hang.
+        remaining_external = _count_external_image_urls(inlined)
+        if remaining_external > 0:
+            raise ProxyResponseError(
+                400,
+                openai_error(
+                    "image_download_failed",
+                    (
+                        f"Failed to download {remaining_external} external image(s). "
+                        "The upstream API only accepts inline data: URLs. "
+                        "Send images as base64 data URLs (data:image/png;base64,...) "
+                        "or ensure the image URLs are publicly accessible."
+                    ),
+                ),
+            )
+        updated_text = json.dumps(inlined, ensure_ascii=True, separators=(",", ":"))
+        if updated_text == text_data:
+            return text_data
+        request_state.request_text = updated_text
+        return updated_text
 
     async def _acquire_request_state_response_create_admission(
         self,
@@ -12979,6 +13044,29 @@ def _response_create_history_omission_notice_item(count: int) -> dict[str, JsonV
 
 def _is_inline_image_reference(value: JsonValue) -> bool:
     return isinstance(value, str) and value.startswith("data:image/")
+
+
+def _count_external_image_urls(payload: dict[str, JsonValue]) -> int:
+    """Count input_image items that still reference an external (non data:) URL."""
+    input_value = payload.get("input")
+    if not isinstance(input_value, list):
+        return 0
+    count = 0
+    for item in input_value:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "input_image":
+                continue
+            image_url = part.get("image_url")
+            if isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
+                count += 1
+    return count
 
 
 def _should_slim_historical_tool_output(output: str) -> bool:
