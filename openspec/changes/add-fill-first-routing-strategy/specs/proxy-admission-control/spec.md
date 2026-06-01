@@ -2,12 +2,12 @@
 
 ## ADDED Requirements
 
-### Requirement: Routing strategy `fill_first` selects the lowest-usage eligible account deterministically
+### Requirement: The fill_first routing strategy MUST select the lowest-usage eligible account deterministically
 
-When the configured `routing_strategy` is `fill_first`, the load balancer
-MUST pick a single account from the effective candidate pool by selecting
-the lowest primary 5h `used_percent`, treating an unknown `used_percent`
-as `0.0`.
+The load balancer MUST pick a single account from the effective candidate
+pool by selecting the lowest primary 5h `used_percent` when the configured
+`routing_strategy` is `fill_first`, treating an unknown `used_percent` as
+`0.0`.
 
 When two or more candidates share the same primary `used_percent`, the
 balancer MUST prefer the candidate with the **higher** secondary

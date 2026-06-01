@@ -16,7 +16,7 @@ export const DashboardSettingsSchema = z.object({
   stickyThreadsEnabled: z.boolean(),
   upstreamStreamTransport: UpstreamStreamTransportSchema.optional().default("default"),
   preferEarlierResetAccounts: z.boolean(),
-  routingStrategy: RoutingStrategySchema.optional().default("usage_weighted"),
+  routingStrategy: RoutingStrategySchema.optional().default("capacity_weighted"),
   relativeAvailabilityPower: z.number().positive().optional().default(2),
   relativeAvailabilityTopK: z.number().int().min(1).max(20).optional().default(5),
   openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional().default(300),
